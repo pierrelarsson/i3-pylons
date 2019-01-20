@@ -1,0 +1,121 @@
+#!/usr/bin/env python
+
+import sys
+import socket
+import struct
+import json
+import os
+import re
+import getopt
+from random import randint
+import Xlib.display
+
+class Words(object):
+    fw = re.compile(r'\W+', re.IGNORECASE)
+
+    def __init__(self, minlength=3, maxlength=8, wordfile='/usr/share/dict/words', attempts=1):
+        self.regex = re.compile(r'\b[a-z]{%s,%s}\b' % (minlength, maxlength), re.IGNORECASE)
+        self.file = wordfile
+        self.attempts = attempts
+
+    def get(self):
+        with open(self.file, 'r') as f:
+            f.seek(0, os.SEEK_END)
+            end = f.tell()
+            for _ in xrange(self.attempts):
+                random = randint(0, end)
+                f.seek(random)
+                data = f.read(2048)
+                try:
+                    if random != 0:
+                        data = data[self.fw.search(data).end(0):]
+                    return self.regex.search(data).group(0).title()
+                except AttributeError:
+                    continue
+            return None
+
+class I3ipc(object):
+    def __init__(self, magic='i3-ipc'):
+        d = Xlib.display.Display()
+        r = d.screen().root
+        self.socket_path = r.get_property(
+            d.get_atom('I3_SOCKET_PATH'),
+            d.get_atom('UTF8_STRING'),
+            0, 9999).value
+        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.socket.connect(self.socket_path)
+        self.magic_string = magic
+        self.magic_format = '<{0}sII'.format(len(self.magic_string))
+        self.magic_length = struct.calcsize(self.magic_format)
+
+    def send(self, m_type, m_data = ''):
+        data = m_data.encode('utf-8')
+        return self.socket.sendall(self.magic_string + struct.pack('=II', len(data), m_type) + data)
+
+    def recv(self):
+        data = self.socket.recv(self.magic_length)
+        (magic_string, m_len, m_type) = struct.unpack(self.magic_format, data)
+        return self.socket.recv(m_len).decode('utf-8')
+
+    def command(self, command):
+        return self.send(0, command)
+
+    def get_workspaces(self):
+        self.send(1)
+        return self.recv()
+
+    def close(self):
+        self.socket.close()
+
+def main(argv):
+    wargs = {}
+    usewords = False
+    useoutput = False
+    move = False
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "mowW:L:")
+    except getopt.GetoptError as e:
+        print e
+        sys.exit(2)
+    for o, a in opts:
+        if o == "-L":
+            (wargs['minlength'], wargs['maxlength']) = re.split('\D+', a, 1)
+        elif o == "-W":
+            wargs['wordfile'] = a
+        elif o == "-w":
+            usewords = True
+        elif o == "-o":
+            useoutput = True
+        elif o == "-m":
+            move = True
+    i3 = I3ipc()
+    w = Words(**wargs)
+    workspaces = {}
+    print i3.get_workspaces()
+    current = None
+    for workspace in json.loads(i3.get_workspaces()):
+        try:
+            if workspace['focused']:
+                current = workspace['output']
+            workspaces[workspace['name']] = True
+            workspaces[workspace['num']] = True
+        except KeyError:
+            pass
+    for workspace in range(1, 999):
+        if usewords:
+            workspace = w.get()
+        if useoutput:
+            workspace = '%s: %s' % (current, workspace)
+        if workspace not in workspaces:
+            break
+    if move:
+        i3.command('move container to workspace %s' % workspace)
+    if type(workspace) == int:
+        i3.command('workspace number %d' % workspace)
+    else:
+        i3.command('workspace %s' % workspace)
+    i3.close()
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
+
